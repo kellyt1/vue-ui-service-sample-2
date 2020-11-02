@@ -1,0 +1,37 @@
+micronaut:
+  application:
+    name: hepdataportal-service
+  server:
+    cors:
+      enabled: true
+  router:
+    static-resources:
+      swagger:
+        paths: classpath:META-INF/swagger
+        mapping: /swagger/**
+      swagger-ui:
+        paths: classpath:META-INF/swagger/views/swagger-ui
+        mapping: /swagger-ui/**
+
+keycloak:
+  realm-id: HEPDataPortal-apps-realm
+  client-id: HEPDataPortal
+  admin-app-client-id: HEPDataPortal
+  base-url: https://authenticator4.nonprod.health.state.mn.us
+  eager-load-public-keys: true
+  user-attribute: clientId
+  permitted-roles:
+    - user
+    - admin
+security:
+  token:
+    issuer: https://authenticator4.nonprod.health.state.mn.us/auth/realms/HEPDataPortal-apps-realm
+
+notifications:
+  emails-sent-from: Health.FHVdata@state.mn.us
+  production: false
+  smtp-host: localhost
+  smtp-port: 2525
+  #smtp-host: rabbitmq01.nonprod.health.state.mn.us
+  #smtp-host: mail.web.health.state.mn.us
+  #smtp-port: 25

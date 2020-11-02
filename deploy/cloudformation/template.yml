@@ -1,0 +1,518 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: HEP Data Portal Web Service
+Transform: AWS::Serverless-2016-10-31
+Parameters:
+  AppName:
+    Type: String
+    Description: "Application Name"
+    Default: "hepdataportal"
+  S3Bucket:
+    Type: String
+  SrcJar:
+    Type: String
+  AuthZip:
+    Type: String
+    Default: ""
+  KeycloakKey:
+    Type: String
+    Description: "Keycloak public key"
+  KeycloakClient:
+    Type: String
+    Description: "Keycloak client id"
+    Default: "site-visit-ws"
+  DBName:
+    Type: String
+    Default: "hepdataportalrds"
+  DBUserName:
+    Type: String
+    Default: "sa"
+  DBPassword:
+    Type: String
+    Default: "changeit"
+  DBPort:
+    Type: String
+    Default: "5432"
+  SubnetIdList:  ### Note: These MUST be private subnets with route to a NAT Gateway created in public subnets ###
+    Type: List<AWS::EC2::Subnet::Id>
+    Default: "subnet-ef864d86,subnet-c9ffe5b1"
+  VpcId:         ###If MNIT has created VPC; you can use !Import instead of passing the value
+    Type: AWS::EC2::VPC::Id
+    Default: "vpc-13a55d7a"
+  DefaultRdsSecurityGroup:
+    Type: String
+    Default: "sg-8ec751e5"
+  AcmCertificateArn:
+    Type: String
+  HostedZoneId:
+    Type: String
+    Default: "Z30Q6S0YHNYDSG"
+  FullDomainName:
+    Type: String
+  LambdaVersion:
+    Type: String
+    Description: "Provision Product version"
+    Default: "1.0.0"
+  Version:
+    Type: String
+    Description: "Provision Product version"
+    Default: "1.2.0"
+  DataBucketName:
+    Type: String
+    Default: "mdh-hepdataportal-nonprod-ws-data"
+  RDSProductName:
+    Type: String
+    Default: "RDS - all"
+  Stage:
+    Type: String
+    Default: default
+    Description: The stage to use in the mapping
+
+
+Globals:
+  Function:
+    Runtime: java8
+    Timeout: 900
+    MemorySize: 1024
+    Environment:
+      Variables:
+        DB_USERNAME: !Ref DBUserName
+        DB_PASSWORD: !Ref DBPassword
+        DB_NAME: !Ref DBName
+        DB_HOST: !GetAtt 'DBHostNameQuery.HostedZoneId'
+        DB_PORT: !Ref DBPort
+    VpcConfig:
+      SecurityGroupIds: [ !GetAtt ServerlessSecurityGroup.GroupId ]
+      SubnetIds: !Ref SubnetIdList
+  Api:
+    Cors:
+      AllowMethods: "'GET,POST,PUT,DELETE'"
+      AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+      AllowOrigin: "'*'"
+
+Resources:
+  DBHostNameQuery:
+    Type: AWS::CloudFormation::CustomResource
+    DeletionPolicy: Delete
+    DependsOn:
+      - 'RdsPostgresProduct'
+    Properties:
+      AwsService: rds
+      BotoArguments:
+        DBInstanceIdentifier: !Ref 'DBName'
+      BotoFunction: describe_db_instances
+      FilterProgram: |
+        #!/usr/bin/env python3
+        import sys
+        import json
+        if __name__ == '__main__':
+            response = None
+            file_name = sys.argv[1]
+            with open(file_name, 'rb') as f:
+                response = json.load(f)
+            response = {
+                'HostedZoneId': response['DBInstances'][0]['Endpoint']['HostedZoneId']
+            }
+            print(json.dumps(response, default=str))
+      ServiceToken: !Join
+        - ''
+        - - 'arn:aws:lambda:'
+          - !Ref 'AWS::Region'
+          - ':'
+          - !Ref 'AWS::AccountId'
+          - :function:mdh-cf-query-account
+
+  DbSgQuery:
+    Type: AWS::CloudFormation::CustomResource
+    DeletionPolicy: Delete
+    DependsOn:
+      - 'RdsPostgresProduct'
+    Properties:
+      AwsService: ec2
+      BotoArguments:
+        Filters:
+          - Name: group-name
+            Values:
+              - !Join
+                - ''
+                - - !Ref 'DBName'
+                  - '-db-sg'
+
+      BotoFunction: describe_security_groups
+      FilterProgram: |
+        #!/usr/bin/env python3
+        import sys
+        import json
+        if __name__ == '__main__':
+            response = None
+            file_name = sys.argv[1]
+            with open(file_name, 'rb') as f:
+                response = json.load(f)
+            response = {
+                'GroupId': response['SecurityGroups'][0]['GroupId']
+            }
+            print(json.dumps(response, default=str))
+      ServiceToken: !Join
+        - ''
+        - - 'arn:aws:lambda:'
+          - !Ref 'AWS::Region'
+          - ':'
+          - !Ref 'AWS::AccountId'
+          - :function:mdh-cf-query-account
+
+  SGIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: cAdvisor Access (monitoring and alerting container host sg)
+      FromPort: 5432
+      ToPort: 5432
+      GroupId:  !GetAtt 'DbSgQuery.GroupId'
+      IpProtocol: TCP
+      SourceSecurityGroupId: !GetAtt 'ServerlessSecurityGroup.GroupId'
+
+#  LambdaRoleProduct:
+#    Type: AWS::ServiceCatalog::CloudFormationProvisionedProduct
+#    Properties:
+#      ProductName:  "Lambda Function Role"
+#      ProvisionedProductName: !Join
+#        - ''
+#        - - !Ref 'AppName'
+#          - LambdaExecutionRole
+#      ProvisioningArtifactName: !Ref 'LambdaVersion'
+#      ProvisioningParameters:
+#        - Key: AppName
+#          Value: !Ref 'AppName'
+#        - Key: InVpc
+#          Value: 'Yes'
+#
+#
+#
+#  LambdaInlinePolicy:
+#    Type: AWS::IAM::Policy
+#    DependsOn:
+#      - "LambdaRoleProduct"
+#    Properties:
+#      PolicyName: !Sub "${AppName}LambdaS3"
+#      PolicyDocument:
+#        Version: "2012-10-17"
+#        Statement:
+#          -
+#            Effect: "Allow"
+#            Action:
+#              - "s3:GetObject"
+#              - "s3:PutObject*"
+#              - "s3:DeleteObject*"
+#              - "s3:ListBucket"
+#              - "s3:ListMultipartUploadParts"
+#              - "s3:AbortMultipartUpload"
+#              - "s3:GetBucketLocation"
+#            Resource: !Sub "arn:aws:s3:::${DataBucketName}/*"
+#      Roles:
+#        - !Sub "${AppName}-LambdaRole"
+
+  LambdaExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${AppName}-LambdaExecutionRole"
+      PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/ent/ent-permissions-boundary"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Sid: "AllowLambdaToAssumeRole"
+            Effect: "Allow"
+            Principal:
+              Service:
+                !Join [ ".", [ "lambda", "amazonaws.com"] ]
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        -
+          PolicyName: !Sub "${AppName}LambdaBasic"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                  - "lambda:InvokeFunction"
+                  - "s3:*"
+                Resource: "*"
+        -
+          PolicyName: !Sub "${AppName}LambdaInvoke"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "lambda:InvokeFunction"
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:parse-address-components"
+        -
+          PolicyName: !Sub "${AppName}LambdaCreateENI"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "ec2:CreateNetworkInterface"
+                  - "ec2:DescribeNetworkInterfaces"
+                  - "ec2:DeleteNetworkInterface"
+                Resource: "*"
+
+  ConfigLambdaPermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref LambdaFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*/*/*
+
+  APIGatewayExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${AppName}-APIGatewayExecutionRole"
+      PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/ent/ent-permissions-boundary"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "AllowAPIGatewayToAssumeRole"
+            Effect: "Allow"
+            Principal:
+              Service:
+                !Join [ ".", [ "apigateway", "amazonaws.com"] ]
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: !Sub "${AppName}LambdaInvoke"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action: "lambda:InvokeFunction"
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppName}-*"
+              - Effect: "Allow"
+                Action: "s3:*"
+                Resource: "*"
+
+  ServerlessSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${AppName}-serverless"
+      GroupDescription: SecurityGroup for Serverless Functions
+      VpcId: !Ref VpcId
+
+
+  RDSSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub "${AppName}-rds-sub"
+      DBSubnetGroupDescription: RDS Subnet Group
+      SubnetIds: !Ref SubnetIdList
+
+  RdsPostgresProduct:
+    Type: AWS::ServiceCatalog::CloudFormationProvisionedProduct
+    Properties:
+      ProductName: !Ref 'RDSProductName'
+      ProvisionedProductName: !Join
+        - ''
+        - - !Ref 'AppName'
+          - RDSPostgres
+      ProvisioningArtifactName: !Ref 'Version'
+      ProvisioningParameters:
+        - Key: "ac2code"
+          Value: "3GAES"
+        - Key: "DBInstanceIdentifier"
+          Value: !Ref 'DBName'
+        - Key: "DBEngineAndMajorVersion"
+          Value: "postgres_11.7"
+        - Key: "DBAllocatedStorage"
+          Value: "20"
+        - Key: "DBUser"
+          Value: "sa"
+        - Key: "DBPassword"
+          Value: "changemechangeme"
+        - Key: "DBInstanceClass"
+          Value: "db.t3.micro"
+        - Key: "DBName"
+          Value: !Ref 'DBName'
+        - Key: "CharacterSetName"
+          Value: "WE8MSWIN1252"
+        - Key: "BackupRetentionPeriod"
+          Value: "21"
+        - Key: "DBParameterGroupName"
+          Value: ""
+        - Key: "OptionGroupName"
+          Value: ""
+        - Key: "KmsKeyArn"
+          Value: ""
+
+
+  #  Api:
+  #    Type: AWS::Serverless::Api
+  #    Properties:
+  #      Name: !Sub "${AppName}"
+  #      StageName: Prod
+  #      BinaryMediaTypes:
+  #        - "~1"
+  #      EndpointConfiguration: REGIONAL
+  #      #Auth:
+  #       # AddDefaultAuthorizerToCorsPreflight: False
+  #       # DefaultAuthorizer: LambdaAuthorizer
+  #       # Authorizers:
+  #        #  LambdaAuthorizer:
+  #         #   FunctionArn: !GetAtt KeycloakAuthorizer.Arn
+  #      Domain:
+  #        DomainName: !Ref FullDomainName
+  #        CertificateArn: !Ref AcmCertificateArn
+  #        EndpointConfiguration: EDGE
+  #      Cors:
+  #        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+  #        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+  #        AllowOrigin: "'*'"
+
+  Api:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: default
+      DefinitionBody:
+        swagger: 2.0
+        info:
+          title: !Sub ${AppName}-api
+        paths:
+          /{proxy+}:
+            x-amazon-apigateway-any-method:
+              produces:
+                - application/json
+              x-amazon-apigateway-integration:
+                uri:
+                  !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunction.Arn}/invocations"
+                passthroughBehavior: when_no_match
+                httpMethod: POST
+                type: aws_proxy
+
+#  GatewayResponse:
+#    Type: AWS::ApiGateway::GatewayResponse
+#    Properties:
+#      ResponseParameters:
+#        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+#        gatewayresponse.header.Access-Control-Allow-Headers: "'*'"
+#      ResponseType: DEFAULT_4XX
+#      RestApiId: !Ref Api
+
+  #  KeycloakAuthorizer:
+  #    Type: AWS::Serverless::Function
+  #    Properties:
+  #      FunctionName: !Sub "${AppName}-keycloakauthorizer"
+  #      Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/delegated/${AppName}-LambdaRole"
+  #      Runtime: nodejs10.x
+  #      Timeout: 300
+  #      MemorySize: 128
+  #      CodeUri:
+  #        Bucket: !Ref S3Bucket
+  #        Key: !Ref AuthZip
+  #      Handler: authorizer.handler
+  #      Environment:
+  #        Variables:
+  #          KEYCLOAK_KEY: !Ref KeycloakKey
+  #          KEYCLOAK_CLIENT: !Ref KeycloakClient
+  #          STAGE: Prod
+  #
+  #
+  #
+  #  InspectionSync:
+  #    Type: AWS::Serverless::Function
+  #    Properties:
+  #      FunctionName: !Sub "${AppName}-Hello"
+  #      Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/delegated/${AppName}-LambdaRole"
+  #      Handler: us.mn.state.health.eh.hep.dss.handler.HelloHandler::handleRequest
+  #      CodeUri:
+  #        Bucket: !Ref S3Bucket
+  #        Key: !Ref SrcJar
+  #      Events:
+  #        MyApi:
+  #          Type: Api
+  #          Properties:
+  #            Path: /
+  #            Method: GET
+  #            RestApiId: !Ref Api
+  #
+  #  HelloPostFunction:
+  #    Type: AWS::Serverless::Function
+  #    Properties:
+  #      FunctionName: !Sub "${AppName}-HelloPost"
+  #      Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/delegated/${AppName}-LambdaRole"
+  #      Handler: us.mn.state.health.eh.hep.dss.handler.HelloPostHandler::handleRequest
+  #      CodeUri:
+  #        Bucket: !Ref S3Bucket
+  #        Key: !Ref SrcJar
+  #      Events:
+  #        MyApi:
+  #          Type: Api
+  #          Properties:
+  #            Path: /
+  #            Method: POST
+  #            RestApiId: !Ref Api
+
+  LambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AppName}"
+      Handler: us.mn.state.health.eh.hep.dss.StreamLambdaHandler::handleRequest
+      CodeUri:
+        Bucket: !Ref S3Bucket
+        Key: !Ref SrcJar
+      Role: !GetAtt LambdaExecutionRole.Arn
+
+#  FileUploadPostFunction:
+#    Type: AWS::Serverless::Function
+#    Properties:
+#      FunctionName: !Sub "${AppName}-FileUpload"
+#      Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/delegated/${AppName}-LambdaRole"
+#      Handler: us.mn.state.health.eh.hep.dss.handler.UploadHandler::handleRequest
+#      CodeUri:
+#        Bucket: !Ref S3Bucket
+#        Key: !Ref SrcJar
+#      Events:
+#        Post:
+#          Type: Api
+#          Properties:
+#            Path: /upload
+#            Method: POST
+#            RestApiId: !Ref Api
+#        Options:
+#          Type: Api
+#          Properties:
+#            RestApiId: !Ref Api
+#            Path: /upload
+#            Method: options
+
+
+Outputs:
+  apiGatewayInvokeURL:
+    Value: !Sub "https://${Api}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
+
+  lambdaArn:
+    Value: !GetAtt "LambdaFunction.Arn"
+
+  apiGatewayId:
+    Value: !Sub "${Api}"
+
+
+
+
+
+
+
+
+#  Disabling until there is time to debug.
+#  RunLiquibaseResource:
+#    Type: AWS::CloudFormation::CustomResource
+#    Properties:
+#      ServiceToken: !GetAtt RunLiquibase.Arn
+

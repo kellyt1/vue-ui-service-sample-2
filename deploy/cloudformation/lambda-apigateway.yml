@@ -1,0 +1,201 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: "Cloud Drive Services API"
+
+Parameters:
+  AppName:
+    Type: String
+  VPCId:
+    Type: AWS::EC2::VPC::Id
+  SubnetIdList:
+    Type: List<AWS::EC2::Subnet::Id>
+  HostedZoneName:
+    Type: String
+    Description : The DNS name of an existing Amazon Route 53 hosted zone
+  ApiUrl:
+    Type: String
+  Stage:
+    Type: String
+    Default: default
+    Description: The stage to use in the mapping
+  AcmCertArn:
+    Type: String
+    Description: ARN of the Amazon Certificate Manager cert to use for SSL
+
+Globals:
+  Function:
+    Tags:
+      owner: CFH
+      ac2code: 3GAQK
+    Timeout: 360
+    Runtime: java8
+    MemorySize: 1024
+    VpcConfig:
+      SecurityGroupIds: [ !GetAtt LambdaSecurityGroup.GroupId ]
+      SubnetIds: !Ref SubnetIdList
+  Api:
+    Cors:
+      AllowMethods: "'GET,POST,PUT,DELETE'"
+      AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+      AllowOrigin: "'*'"
+
+Resources:
+
+  LambdaExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${AppName}-LambdaExecutionRole"
+      PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/ent/ent-permissions-boundary"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Sid: "AllowLambdaToAssumeRole"
+            Effect: "Allow"
+            Principal:
+              Service:
+                !Join [ ".", [ "lambda", "amazonaws.com"] ]
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        -
+          PolicyName: !Sub "${AppName}LambdaBasic"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                  - "lambda:InvokeFunction"
+                  - "s3:*"
+                Resource: "*"
+        -
+          PolicyName: !Sub "${AppName}LambdaInvoke"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "lambda:InvokeFunction"
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:parse-address-components"
+        -
+          PolicyName: !Sub "${AppName}LambdaCreateENI"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "ec2:CreateNetworkInterface"
+                  - "ec2:DescribeNetworkInterfaces"
+                  - "ec2:DeleteNetworkInterface"
+                Resource: "*"
+
+  APIGatewayExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${AppName}-APIGatewayExecutionRole"
+      PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/ent/ent-permissions-boundary"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Sid: "AllowAPIGatewayToAssumeRole"
+            Effect: "Allow"
+            Principal:
+              Service:
+                !Join [ ".", [ "apigateway", "amazonaws.com"] ]
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        -
+          PolicyName: !Sub "${AppName}LambdaInvoke"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action: "lambda:InvokeFunction"
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppName}-*"
+              -
+                Effect: "Allow"
+                Action: "s3:*"
+                Resource: "*"
+
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${AppName}-lambda-sg
+      GroupDescription: !Sub SecurityGroup for ${AppName} Lambda
+      VpcId: !Ref VPCId
+
+  LambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AppName}"
+      Handler: us.mn.state.health.clouddrive.StreamLambdaHandler::handleRequest
+      CodeUri: ../artifacts/bundle.zip
+      Role: !GetAtt LambdaExecutionRole.Arn
+
+  RestApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: default
+      DefinitionBody:
+        swagger: 2.0
+        info:
+          title: !Sub ${AppName}-api
+        paths:
+          /{proxy+}:
+            x-amazon-apigateway-any-method:
+              produces:
+                - application/json
+              x-amazon-apigateway-integration:
+                uri:
+                  !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunction.Arn}/invocations"
+                passthroughBehavior: when_no_match
+                httpMethod: POST
+                type: aws_proxy
+
+#  APIDomainName:
+#    Type: AWS::ApiGateway::DomainName
+#    Properties:
+#      CertificateArn: !Ref AcmCertArn
+#      DomainName: !Ref ApiUrl
+#      EndpointConfiguration:
+#        Types:
+#          - EDGE
+#
+#  APIBasePathMapping:
+#    Type: AWS::ApiGateway::BasePathMapping
+#    Properties:
+#      DomainName: !Ref APIDomainName
+#      RestApiId: !Ref RestApi
+#      Stage: !Ref Stage
+#
+#  APIDomain:
+#    Type: AWS::Route53::RecordSetGroup
+#    Properties:
+#      HostedZoneName: !Sub ${HostedZoneName}.
+#      RecordSets:
+#        - Name: !Ref ApiUrl
+#          Type: A
+#          AliasTarget:
+#            DNSName: !GetAtt APIDomainName.DistributionDomainName
+#            HostedZoneId: Z2FDTNDATAQYW2 # static ID for CloudFront aliases
+
+Outputs:
+  apiGatewayInvokeURL:
+    Value: !Sub "https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
+
+  lambdaArn:
+    Value: !GetAtt "LambdaFunction.Arn"
+
+  apiGatewayId:
+    Value: !Sub "${RestApi}"
